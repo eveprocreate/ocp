@@ -77,6 +77,9 @@ class PaiNN(BaseModel):
         otf_graph: bool = True,
         num_elements: int = 83,
         scale_file: Optional[str] = None,
+        efermi_length = 64,
+        multiply_efermi = False, 
+        concatenate_efermi = False
     ) -> None:
         super(PaiNN, self).__init__()
 
@@ -93,9 +96,21 @@ class PaiNN(BaseModel):
         # Borrowed from GemNet.
         self.symmetric_edge_symmetrization = False
 
-        #### Learnable parameters #############################################
+        #### Learnable parameters ############################################
+        
+        self.multiply_efermi = multiply_efermi
+        self.concatenate_efermi = concatenate_efermi
+        
+        self.efermi_length = efermi_length
+        
+        self.efermi_FC = nn.Linear(in_features=1, out_features=self.efermi_length, bias=True)
 
-        self.atom_emb = AtomEmbedding(hidden_channels, num_elements)
+        if self.concatenate_efermi:
+            self.atom_emb = AtomEmbedding(hidden_channels-self.efermi_length, num_elements)
+            # self.atom_emb = AtomEmbedding(hidden_channels-1, num_elements)
+        else:
+            self.atom_emb = AtomEmbedding(hidden_channels, num_elements)
+
 
         self.radial_basis = RadialBasis(
             num_radial=num_rbf,
@@ -372,6 +387,24 @@ class PaiNN(BaseModel):
         pos = data.pos
         batch = data.batch
         z = data.atomic_numbers.long()
+        ### DOS ###        
+
+        if self.multiply_efermi or self.concatenate_efermi:
+            # Fully connected layers implementation
+            
+            efermi = data.efermi
+            efermi_tensor = efermi[batch].reshape((-1, 1))#.to(device=device_efermi)  ## accepts only .float32  
+            # print("\n !+!+! Current device: ", efermi_tensor.device, "\n")
+            efermi_FC_transform = self.efermi_FC(efermi_tensor)
+            
+            # for instance in range( efermi_tensor.size(1) ):  ## 64
+            #     efermi_FC[instance] = efermi_FC_transform(efermi_tensor[instance])
+            
+            bulk_dos = data.bulk_total_dos
+
+            # print("efermi_FC ", efermi_FC, efermi_FC.dtype, efermi_FC.shape)
+        
+        ###########
 
         if self.regress_forces and not self.direct_forces:
             pos = pos.requires_grad_(True)
@@ -388,7 +421,40 @@ class PaiNN(BaseModel):
 
         edge_rbf = self.radial_basis(edge_dist)  # rbf * envelope
 
+        # x = self.atom_emb(z) ### Size[153, 512]
+        
+        ### DOS + efermi implementation ###
+
         x = self.atom_emb(z)
+
+        #=#=#=# for testing out
+
+        # print("x atom embedding ", x, x.dtype)
+        # print("len x ", x.shape, len(x) )
+        # print("efermi ", efermi, efermi[0].item(), efermi[1].item())
+
+
+        
+        #=#=#=# tensor-like multiplication solution
+        # multiply_efermi = False
+        
+        if self.multiply_efermi:
+            x = torch.mul(x, efermi_tensor)
+        # print("x embedding multiplied ", x, x.dtype)
+
+        #=#=#=# tensor-like concatenation:
+        
+        # concatenate_efermi = True
+        
+        if self.concatenate_efermi:
+            
+            # x = torch.hstack((x, efermi_tensor))
+            x = torch.hstack((x, efermi_FC_transform))
+        # print("x embedding concateneted ", x, x.dtype, x.shape)
+
+        # print("\n---forward pass check---\n")  
+
+        ############
         vec = torch.zeros(x.size(0), 3, x.size(1), device=x.device)
 
         #### Interaction blocks ###############################################
